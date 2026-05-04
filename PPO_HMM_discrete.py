@@ -359,7 +359,15 @@ def evaluate_agent(model, df: pd.DataFrame, feature_cols: list, label: str = "")
 # ══════════════════════════════════════════════════════════════════
 #  PLOTTING
 # ══════════════════════════════════════════════════════════════════
-def plot_results(baseline_res: dict, regime_res: dict):
+def plot_all_results(baseline_res: dict, regime_res: dict, test_df: pd.DataFrame):
+    """Generate and save a comprehensive set of result plots."""
+    print("\n[Plot] Generating all result plots...")
+    plot_summary_dashboard(baseline_res, regime_res)
+    plot_separate_charts(baseline_res, regime_res, test_df)
+    print(f"[Plot] All plots saved in → {CFG.PLOT_PATH}")
+
+def plot_summary_dashboard(baseline_res: dict, regime_res: dict):
+    """Plots the main summary dashboard."""
     fig = plt.figure(figsize=(20, 12))
     fig.suptitle("PPO + HMM  ·  Discrete Action Space  (Hold / Buy / Sell)",
                  fontsize=15, fontweight="bold", y=1.01)
@@ -422,10 +430,90 @@ def plot_results(baseline_res: dict, regime_res: dict):
     ax.set_xticks(np.arange(3)); ax.set_xticklabels(labels)
     ax.set_title("Action Distribution (Test)"); ax.legend(); ax.grid(axis="y", alpha=0.3)
 
-    plt.savefig(os.path.join(CFG.PLOT_PATH, "ppo_hmm_discrete_results.png"), dpi=150, bbox_inches="tight")
-    plt.show()
-    print(f"\n[Plot] Saved → {os.path.join(CFG.PLOT_PATH, 'ppo_hmm_discrete_results.png')}")
+    plt.savefig(os.path.join(CFG.PLOT_PATH, "summary_dashboard.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
+def plot_separate_charts(baseline_res: dict, regime_res: dict, test_df: pd.DataFrame):
+    """Generates and saves individual, more detailed plots for analysis."""
+    dates = test_df['date'].reset_index(drop=True)
+
+    # 1. Portfolio Growth
+    fig, ax = plt.subplots(figsize=(12, 7))
+    bh_series = CFG.INITIAL_CAPITAL * (1 + test_df['close'].pct_change().cumsum().fillna(0))
+    ax.plot(dates, baseline_res["portfolio_values"][:len(dates)], label=f"Baseline (Sharpe: {baseline_res['sharpe']:.2f})")
+    ax.plot(dates, regime_res["portfolio_values"][:len(dates)], label=f"Regime-Aware (Sharpe: {regime_res['sharpe']:.2f})")
+    ax.plot(dates, bh_series, label="Buy & Hold", linestyle="--", color='grey')
+    ax.set_title("Portfolio Growth (Test Set)"); ax.set_xlabel("Date"); ax.set_ylabel("Value (₹)")
+    ax.legend(); ax.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(CFG.PLOT_PATH, "1_portfolio_growth.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # 2. Drawdown
+    fig, ax = plt.subplots(figsize=(12, 7))
+    for res, label in [(baseline_res, "Baseline"), (regime_res, "Regime-Aware")]:
+        pv = pd.Series(res["portfolio_values"], index=dates[:len(res["portfolio_values"])])
+        dd = (pv / pv.cummax()) - 1
+        ax.plot(dd, label=f"{label} (Max: {res['max_drawdown']:.2%})")
+    ax.set_title("Drawdown (Test Set)"); ax.set_xlabel("Date"); ax.set_ylabel("Drawdown")
+    ax.legend(); ax.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(CFG.PLOT_PATH, "2_drawdown.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # 3. Actions Plot
+    fig, ax = plt.subplots(figsize=(12, 7))
+    ax.plot(dates, test_df['close'], label="Price", color='grey', alpha=0.5)
+    ax.set_ylabel("Price")
+    ax2 = ax.twinx()
+    buy_signals = [dates[i] for i, a in enumerate(regime_res['actions']) if a == 1]
+    sell_signals = [dates[i] for i, a in enumerate(regime_res['actions']) if a == 2]
+    ax2.plot(buy_signals, [1]*len(buy_signals), '^', color='green', markersize=8, label='Buy')
+    ax2.plot(sell_signals, [0]*len(sell_signals), 'v', color='red', markersize=8, label='Sell')
+    ax2.set_ylim(-0.5, 1.5)
+    ax2.set_yticks([])
+    ax.set_title("Regime-Aware Agent Actions on Price"); ax.set_xlabel("Date")
+    fig.legend(loc="upper right")
+    plt.savefig(os.path.join(CFG.PLOT_PATH, "3_actions.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # 4. Rolling Sharpe
+    fig, ax = plt.subplots(figsize=(12, 7))
+    for res, label in [(baseline_res, "Baseline"), (regime_res, "Regime-Aware")]:
+        rets = pd.Series(res["step_returns"], index=dates[:len(res["step_returns"])])
+        rolling_sharpe = rets.rolling(window=60).mean() / rets.rolling(window=60).std() * np.sqrt(252)
+        ax.plot(rolling_sharpe, label=f"{label} Rolling Sharpe (60-day)")
+    ax.set_title("Rolling Sharpe Ratio"); ax.set_xlabel("Date"); ax.legend(); ax.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(CFG.PLOT_PATH, "4_rolling_sharpe.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # 5. Monthly Returns Heatmap
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
+    for i, (res, label) in enumerate([(baseline_res, "Baseline"), (regime_res, "Regime-Aware")]):
+        ax = (ax1, ax2)[i]
+        rets = pd.Series(res["step_returns"], index=dates[:len(res["step_returns"])])
+        monthly_rets = rets.resample('M').apply(lambda x: (1 + x).prod() - 1)
+        
+        monthly_rets.index = pd.to_datetime(monthly_rets.index)
+        monthly_rets_df = pd.DataFrame({
+            'year': monthly_rets.index.year,
+            'month': monthly_rets.index.month,
+            'return': monthly_rets.values
+        })
+        heatmap_df = monthly_rets_df.pivot(index='year', columns='month', values='return')
+        
+        import seaborn as sns
+        sns.heatmap(heatmap_df, ax=ax, annot=True, fmt='.1%', cmap='viridis', cbar=False)
+        ax.set_title(f"{label} Monthly Returns")
+        ax.set_xlabel("Month")
+        ax.set_ylabel("Year")
+    plt.tight_layout()
+    plt.savefig(os.path.join(CFG.PLOT_PATH, "5_monthly_returns_heatmap.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+def plot_results(baseline_res: dict, regime_res: dict):
+    # This function is kept for compatibility but the main logic is moved
+    # to plot_summary_dashboard.
+    plot_summary_dashboard(baseline_res, regime_res)
+    plt.show()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -510,7 +598,7 @@ def run(total_timesteps: int = CFG.TOTAL_TIMESTEPS, train_split: float = CFG.TRA
     print(f"[Model] Saved → {CFG.SAVE_PATH}_regime_final.zip")
 
     # ── Plot ─────────────────────────────────────────────────────
-    plot_results(baseline_res, regime_res)
+    plot_all_results(baseline_res, regime_res, test_df)
 
     return model_b, model_r, baseline_res, regime_res
 
