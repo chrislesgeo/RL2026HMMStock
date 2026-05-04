@@ -47,7 +47,7 @@ from regime_features import extract_features, compute_trend_slope, compute_rsi
 #  CONFIG
 # ══════════════════════════════════════════════════════════════════
 class Config:
-    DATA_PATH        = "Data/itc/itc_rl_features.csv"
+    DATA_PATH        = "Data/apple/apple_rl_features.csv"
     TRAIN_SPLIT      = 0.75
 
     # Environment
